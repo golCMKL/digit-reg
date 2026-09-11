@@ -1,8 +1,9 @@
+from pathlib import Path
+
 import joblib
 import numpy as np
 from flask import Flask, jsonify, request
 from PIL import Image
-from pathlib import Path
 
 app = Flask(__name__)
 
