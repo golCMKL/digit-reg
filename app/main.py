@@ -2,10 +2,12 @@ import joblib
 import numpy as np
 from flask import Flask, jsonify, request
 from PIL import Image
+from pathlib import Path
 
 app = Flask(__name__)
 
-model = joblib.load("mlp_model.pkl")
+BASE_DIR = Path(__file__).resolve().parent
+model = joblib.load(BASE_DIR / "mlp_model.pkl")
 
 print("MLP model loaded successfully")
 
