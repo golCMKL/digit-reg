@@ -1,0 +1,18 @@
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+    container_name: digit-api
+    ports:
+      - "5000:5000"
+
+  gradio:
+    build:
+      context: .
+      dockerfile: Dockerfile.gradio
+    container_name: digit-gradio
+    ports:
+      - "7860:7860"
+    depends_on:
+      - api
