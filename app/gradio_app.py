@@ -5,7 +5,7 @@ import numpy as np
 import requests
 from PIL import Image
 
-FLASK_URL = "http://127.0.0.1:5000/predict"
+FLASK_URL = "http://api:5000/predict"
 
 def predict_digit(image):
     if image is None:
