@@ -77,10 +77,20 @@ def initialize_model(backend):
 
     if backend == "torch":
         predict_fn = build_torch()
+
     elif backend == "onnx":
-        predict_fn = build_onnx("digit_cnn.onnx")
+        model_path = os.path.join(
+            os.path.dirname(__file__),
+            "digit_cnn.onnx"
+        )
+        predict_fn = build_onnx(model_path)
+
     elif backend == "onnx-int8":
-        predict_fn = build_onnx("digit_cnn_int8.onnx")
+        model_path = os.path.join(
+        os.path.dirname(__file__),
+        "digit_cnn_int8.onnx"
+    )
+        predict_fn = build_onnx(model_path)
     else:
         raise ValueError(f"Unknown backend: {backend}")
 
