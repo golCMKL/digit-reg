@@ -2,7 +2,11 @@ import io
 
 from PIL import Image
 
-from app.main import app
+from app.server import app, initialize_model
+
+
+def setup_module():
+    initialize_model("onnx-int8")
 
 
 def test_home():
@@ -13,8 +17,18 @@ def test_home():
     assert response.status_code == 200
 
 
-def test_predict():
+def test_predict(monkeypatch):
     client = app.test_client()
+
+    # Prevent the test from depending on a real Redis server
+    class MockCache:
+        def get(self, key):
+            return None
+
+        def setex(self, key, timeout, value):
+            pass
+
+    monkeypatch.setattr("app.server.cache", MockCache())
 
     image = Image.new("L", (28, 28), 0)
 
