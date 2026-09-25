@@ -6,9 +6,14 @@ COPY requirements.txt .
 
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY app/main.py .
-COPY app/mlp_model.pkl .
+COPY app/server.py .
+
+COPY app/digit_cnn.onnx .
+COPY app/digit_cnn.onnx.data .
+COPY app/digit_cnn_int8.onnx .
+
+ENV MODEL_BACKEND=onnx-int8
 
 EXPOSE 5000
 
-CMD ["python", "main.py"]
+CMD ["gunicorn", "--workers", "4", "--bind", "0.0.0.0:5000", "server:app"]

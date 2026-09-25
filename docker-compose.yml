@@ -1,18 +1,37 @@
 services:
-  api:
-    build:
-      context: .
-      dockerfile: Dockerfile.api
-    container_name: digit-api
-    ports:
-      - "5000:5000"
-
   gradio:
     build:
       context: .
       dockerfile: Dockerfile.gradio
+
     container_name: digit-gradio
+
     ports:
       - "7860:7860"
+
+    environment:
+      FLASK_URL: http://api:5000
+
     depends_on:
       - api
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+
+    container_name: digit-api
+
+    ports:
+      - "5000:5000"
+
+    environment:
+      MODEL_BACKEND: onnx-int8
+      REDIS_HOST: redis
+
+    depends_on:
+      - redis
+
+  redis:
+    image: redis:7-alpine
+    container_name: digit-redis
