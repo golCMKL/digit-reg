@@ -1,16 +1,21 @@
-from pathlib import Path
 
-import joblib
 import numpy as np
+import torch
+import torch.nn.functional as F
 from flask import Flask, jsonify, request
+from model import load_model
 from PIL import Image
 
 app = Flask(__name__)
 
-BASE_DIR = Path(__file__).resolve().parent
-model = joblib.load(BASE_DIR / "mlp_model.pkl")
+model = load_model()
 
-print("MLP model loaded successfully")
+
+print("Loaded model successfully")
+
+#BASE_DIR = Path(__file__).resolve().parent
+#model = joblib.load(BASE_DIR / "mlp_model.pkl")
+
 
 
 @app.route('/predict', methods=["POST"])
@@ -29,21 +34,26 @@ def predict():
 
     image = image /255.0
 
-    image = image.reshape(1,784)
+    image = torch.tensor(image).unsqueeze(0).unsqueeze(0)
 
-    prediction = model.predict(image)[0]
+    with torch.no_grad():
+        output = model(image)
 
-    probabilities = model.predict_proba(image)[0]
+    probabilities = F.softmax(output, dim=1)
+
+    prediction = probabilities.argmax(dim=1).item()
+
+    confidence = probabilities[0, prediction].item()
 
     return jsonify({
         "prediction": int(prediction),
-        "confidence": float(probabilities[prediction])
+        "confidence": float(confidence)
     })
 
 @app.route("/", methods=["GET"])
 def home():
     return jsonify({
-        "message": "MLP prediction API is running"
+        "message": "Prediction API is running"
     })
 
 if __name__ == '__main__':
