@@ -6,10 +6,11 @@ import requests
 from PIL import Image
 
 FLASK_URL = "http://api:5000/predict"
+#FLASK_URL = "http://127.0.0.1:5000/predict"
 
 def predict_digit(image):
     if image is None:
-        return "Please draw a digit."
+        return "Please draw a digit.", None
 
     if isinstance(image, dict):
         image = image["composite"]
@@ -38,7 +39,7 @@ def predict_digit(image):
     )
 
     if response.status_code != 200:
-        return f"Error: {response.text}"
+        return f"Error: {response.text}", processed_image
 
     result = response.json()
 
@@ -52,13 +53,11 @@ def predict_digit(image):
 demo = gr.Interface(
     fn=predict_digit,
 
-    inputs=gr.ImageEditor(
-        type="pil",
-        image_mode="L",
-        sources=[],
-        layers=False,
-        label="Draw a digit",
-        canvas_size=(800, 800),
+    inputs = gr.Sketchpad(
+    type="pil",
+    image_mode="L",
+    label="Draw a digit",
+    canvas_size=(800, 800),
     ),
 
     outputs=[
