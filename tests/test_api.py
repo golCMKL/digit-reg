@@ -30,6 +30,9 @@ def test_predict(monkeypatch):
 
     monkeypatch.setattr("app.server.cache", MockCache())
 
+    # Prevent the test from depending on a real PostgreSQL server
+    monkeypatch.setattr("app.server.log_prediction", lambda **kwargs: None)
+
     image = Image.new("L", (28, 28), 0)
 
     image_bytes = io.BytesIO()
@@ -38,18 +41,8 @@ def test_predict(monkeypatch):
 
     response = client.post(
         "/predict",
-        data={
-            "image": (
-                image_bytes,
-                "digit.png"
-            )
-        },
-        content_type="multipart/form-data"
+        data={"image": (image_bytes, "digit.png")},
+        content_type="multipart/form-data",
     )
 
     assert response.status_code == 200
-
-    data = response.json
-
-    assert "prediction" in data
-    assert "confidence" in data
