@@ -11,14 +11,31 @@ import hashlib
 import io
 import json
 import os
+import time
+from pathlib import Path
 
 import numpy as np
 import psutil
+import psycopg
 import redis
 from flask import Flask, jsonify, request
-from PIL import Image
+from PIL import Image, UnidentifiedImageError
 
 IMG_SIZE = 28  # preprocessing matches the original app: grayscale -> 28x28 -> /255 (no mean/std)
+
+APP_DIR = Path(__file__).resolve().parent
+MODEL_DIR = APP_DIR / "models"
+
+PROJECT_ROOT = APP_DIR.parent
+
+IMAGE_DIR = Path(
+    os.getenv(
+        "IMAGE_DIR",
+        str(PROJECT_ROOT / "data" / "collected_images")
+    )
+)
+
+IMAGE_DIR.mkdir(parents=True, exist_ok=True)
 
 app = Flask(__name__)
 predict_fn = None
@@ -29,11 +46,57 @@ cache = redis.Redis(
     decode_responses=True
 )
 
+DB_CONFIG = {
+    "host": os.getenv("DB_HOST", "localhost"),
+    "port": os.getenv("DB_PORT", "5432"),
+    "dbname": os.getenv("DB_NAME", "digit_db"),
+    "user": os.getenv("DB_USER", "digit_user"),
+    "password": os.getenv("DB_PASSWORD", "digit_password"),
+}
+
+def init_db():
+    with psycopg.connect(**DB_CONFIG) as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS predictions (
+                    id SERIAL PRIMARY KEY,
+                    request_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    prediction INTEGER NOT NULL,
+                    confidence REAL NOT NULL,
+                    cached BOOLEAN NOT NULL
+                )
+            """)
+        conn.commit()
+
 
 def preprocess(file_bytes: bytes) -> np.ndarray:
     img = Image.open(io.BytesIO(file_bytes)).convert("L").resize((IMG_SIZE, IMG_SIZE))
     arr = np.asarray(img, dtype=np.float32) / 255.0
     return arr[None, None, :, :]  # (1, 1, 28, 28)
+
+def save_uploaded_image(file_bytes: bytes, image_hash: str) -> str:
+    """Save an uploaded image once and return its project-relative path."""
+    with Image.open(io.BytesIO(file_bytes)) as image:
+        image_format = (image.format or "PNG").upper()
+
+    extensions = {
+        "PNG": ".png",
+        "JPEG": ".jpg",
+        "WEBP": ".webp",
+        "BMP": ".bmp",
+        "GIF": ".gif",
+        "TIFF": ".tiff",
+    }
+
+    extension = extensions.get(image_format, ".img")
+    filename = f"{image_hash}{extension}"
+    destination = IMAGE_DIR / filename
+
+    # Identical uploads share one stored image.
+    if not destination.exists():
+        destination.write_bytes(file_bytes)
+
+    return f"data/collected_images/{filename}"
 
 
 def softmax_np(logits: np.ndarray) -> np.ndarray:
@@ -79,18 +142,11 @@ def initialize_model(backend):
         predict_fn = build_torch()
 
     elif backend == "onnx":
-        model_path = os.path.join(
-            os.path.dirname(__file__),
-            "digit_cnn.onnx"
-        )
-        predict_fn = build_onnx(model_path)
+        predict_fn = build_onnx(str(MODEL_DIR / "digit_cnn.onnx"))
 
     elif backend == "onnx-int8":
-        model_path = os.path.join(
-        os.path.dirname(__file__),
-        "digit_cnn_int8.onnx"
-    )
-        predict_fn = build_onnx(model_path)
+        
+        predict_fn = build_onnx(str(MODEL_DIR / "digit_cnn_int8.onnx"))
     else:
         raise ValueError(f"Unknown backend: {backend}")
 
@@ -101,42 +157,177 @@ def initialize_model(backend):
         )
     )
 
+def log_prediction(
+    prediction,
+    confidence,
+    cached,
+    latency_ms,
+    error=None,
+    input_mean=None,
+    input_std=None,
+    input_min=None,
+    input_max=None,
+    nonzero_ratio=None,
+    image_path=None,
+    image_hash=None,
+):
+    with psycopg.connect(**DB_CONFIG) as conn, conn.cursor() as cur:
+        cur.execute("""
+                INSERT INTO predictions (
+                    prediction,
+                    confidence,
+                    cached,
+                    latency_ms,
+                    error,
+                    input_mean,
+                    input_std,
+                    input_min,
+                    input_max,
+                    nonzero_ratio,
+                    image_path,
+                    image_hash
+                )
+                VALUES (
+                    %s, %s, %s, %s, %s, %s,
+                    %s, %s, %s, %s, %s, %s
+                )
+            """, (
+            prediction,
+            confidence,
+            cached,
+            latency_ms,
+            error,
+            input_mean,
+            input_std,
+            input_min,
+            input_max,
+            nonzero_ratio,
+            image_path,
+            image_hash,
+        ))
+
 
 @app.route("/predict", methods=["POST"])
 def predict():
+    start_time = time.perf_counter()
+
     if "image" not in request.files:
+        log_prediction(
+            prediction=None,
+            confidence=None,
+            cached=False,
+            latency_ms=(time.perf_counter() - start_time) * 1000,
+            error="No image provided",
+        )
         return jsonify({"error": "No image provided"}), 400
 
     file_bytes = request.files["image"].read()
 
-    # Create a unique key based on the image
+    if not file_bytes:
+        log_prediction(
+            prediction=None,
+            confidence=None,
+            cached=False,
+            latency_ms=(time.perf_counter() - start_time) * 1000,
+            error="Empty image file",
+        )
+        return jsonify({"error": "Empty image file"}), 400
+
     image_hash = hashlib.sha256(file_bytes).hexdigest()
+
+    # Validate and preprocess the image before saving it.
+    try:
+        x = preprocess(file_bytes)
+        image_path = save_uploaded_image(file_bytes, image_hash)
+    except (UnidentifiedImageError, ValueError, OSError):
+        log_prediction(
+            prediction=None,
+            confidence=None,
+            cached=False,
+            latency_ms=(time.perf_counter() - start_time) * 1000,
+            error="Invalid image",
+            image_hash=image_hash,
+        )
+        return jsonify({"error": "Invalid image"}), 400
+
+    # Collect statistics for cache hits as well as cache misses.
+    input_mean = float(x.mean())
+    input_std = float(x.std())
+    input_min = float(x.min())
+    input_max = float(x.max())
+    nonzero_ratio = float((x > 0).mean())
+
     cache_key = f"prediction:{image_hash}"
 
-    cached = cache.get(cache_key)
+    try:
+        cached_result = cache.get(cache_key)
+    except redis.RedisError:
+        # If Redis is unavailable, inference can still proceed.
+        cached_result = None
 
-    if cached is not None:
-        result = json.loads(cached)
+    if cached_result is not None:
+        result = json.loads(cached_result)
+
+        log_prediction(
+            prediction=result["prediction"],
+            confidence=result["confidence"],
+            cached=True,
+            latency_ms=(time.perf_counter() - start_time) * 1000,
+            input_mean=input_mean,
+            input_std=input_std,
+            input_min=input_min,
+            input_max=input_max,
+            nonzero_ratio=nonzero_ratio,
+            image_path=image_path,
+            image_hash=image_hash,
+        )
+
         result["cached"] = True
         return jsonify(result)
 
-    # Cache miss -> actually run the model
-    x = preprocess(file_bytes)
-    pred, conf = predict_fn(x)
+    try:
+        pred, conf = predict_fn(x)
+    except (ValueError, RuntimeError):
+        log_prediction(
+            prediction=None,
+            confidence=None,
+            cached=False,
+            latency_ms=(time.perf_counter() - start_time) * 1000,
+            error="Inference failed",
+            input_mean=input_mean,
+            input_std=input_std,
+            input_min=input_min,
+            input_max=input_max,
+            nonzero_ratio=nonzero_ratio,
+            image_path=image_path,
+            image_hash=image_hash,
+        )
+        return jsonify({"error": "Inference failed"}), 500
 
     result = {
         "prediction": pred,
-        "confidence": conf
+        "confidence": conf,
+        "cached": False,
     }
 
-    # Store result for 1 hour
-    cache.setex(
-        cache_key,
-       3600,
-        json.dumps(result)
-    )
+    try:
+        cache.setex(cache_key, 3600, json.dumps(result))
+    except redis.RedisError:
+        pass
 
-    result["cached"] = False
+    log_prediction(
+        prediction=pred,
+        confidence=conf,
+        cached=False,
+        latency_ms=(time.perf_counter() - start_time) * 1000,
+        input_mean=input_mean,
+        input_std=input_std,
+        input_min=input_min,
+        input_max=input_max,
+        nonzero_ratio=nonzero_ratio,
+        image_path=image_path,
+        image_hash=image_hash,
+    )
 
     return jsonify(result)
 
@@ -174,7 +365,22 @@ if __name__ == "__main__":
     parser.add_argument("--port", type=int, required=True)
     parser.add_argument("--host", default="127.0.0.1")
 
+    parser.add_argument("--init-db", action="store_true")
+
     args = parser.parse_args()
+
+    if args.init_db:
+        init_db()
+        print("Database initialized")
+    else:
+        initialize_model(args.backend)
+        print(f"Loaded {args.backend} model successfully")
+        app.run(
+            host=args.host,
+            port=args.port,
+            debug=False,
+            threaded=False
+        )
 
     initialize_model(args.backend)
 
