@@ -3,35 +3,102 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.gradio
-
     container_name: digit-gradio
-
     ports:
       - "7860:7860"
-
     environment:
       FLASK_URL: http://api:5000
-
     depends_on:
-      - api
+      api:
+        condition: service_started
 
   api:
     build:
       context: .
       dockerfile: Dockerfile.api
-
     container_name: digit-api
-
     ports:
       - "5000:5000"
-
     environment:
       MODEL_BACKEND: onnx-int8
       REDIS_HOST: redis
-
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_NAME: digit_db
+      DB_USER: digit_user
+      DB_PASSWORD: digit_password
+      IMAGE_DIR: /app/data/collected_images
     depends_on:
-      - redis
+      redis:
+        condition: service_started
+      postgres:
+        condition: service_healthy
+    volumes:
+      - ./data/collected_images:/app/data/collected_images
 
   redis:
     image: redis:7-alpine
     container_name: digit-redis
+
+  postgres:
+    image: postgres:17-alpine
+    container_name: digit-postgres
+    ports:
+      - "5433:5432"
+    environment:
+      POSTGRES_DB: digit_db
+      POSTGRES_USER: digit_user
+      POSTGRES_PASSWORD: digit_password
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U digit_user -d digit_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  monitoring:
+    build:
+      context: .
+      dockerfile: Dockerfile.monitoring
+    container_name: digit-monitoring
+    ports:
+      - "8501:8501"
+    environment:
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_NAME: digit_db
+      DB_USER: digit_user
+      DB_PASSWORD: digit_password
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  labeling:
+    build:
+      context: .
+      dockerfile: Dockerfile.monitoring
+    container_name: digit-labeling
+    command:
+      - streamlit
+      - run
+      - retraining/labeling_app.py
+      - --server.address=0.0.0.0
+      - --server.port=8502
+    ports:
+      - "8502:8502"
+    environment:
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_NAME: digit_db
+      DB_USER: digit_user
+      DB_PASSWORD: digit_password
+      IMAGE_DIR: /app/data/collected_images
+    volumes:
+      - ./data/collected_images:/app/data/collected_images
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+volumes:
+  postgres_data:
